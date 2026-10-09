@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+contract ChronosPatentVault {
+    enum AssetState { Active, Delisted }
+
+    struct IntellectualAsset {
+        address payable author;
+        uint256 licenseFee;
+        uint256 totalLicensesSold;
+        AssetState state;
+        bytes32 metadataCID;
+    }
+
+    address payable public immutable registryCurator;
+    string public vaultDescriptor;
+    uint256 public assetCounter;
+    uint256 public accumulatedRoyalties;
+
+    mapping(uint256 => IntellectualAsset) public assets;
+    mapping(uint256 => mapping(address => bool)) public licensedUsers;
+
+    event AssetRegistered(uint256 indexed assetId, address indexed author, uint256 licenseFee, bytes32 metadataCID);
+    event LicensePurchased(uint256 indexed assetId, address indexed licensee, uint256 feePaid);
+    event AssetDelisted(uint256 indexed assetId);
+    event RoyaltiesHarvested(address indexed receiver, uint256 amount);
+    event LicenseRepriced(uint256 indexed assetId, uint256 newFee);
+    event OwnershipTransferred(uint256 indexed assetId, address indexed oldAuthor, address indexed newAuthor);
+    event DescriptorUpdated(string newDescriptor);
+    event ReservesDrained(address indexed curator, uint256 amount);
+
+    modifier onlyCurator() {
+        require(msg.sender == registryCurator, "PatentVault: Access denied");
+        _;
+    }
+
+    constructor() {
+        registryCurator = payable(msg.sender);
+        vaultDescriptor = "Chronos Base IP Patent Registry v1";
+    }
+
+    // 1. buyCommercialLicense
+    function buyCommercialLicense(uint256 assetId) external payable {
+        IntellectualAsset storage item = assets[assetId];
+        require(assetId > 0 && assetId <= assetCounter, "PatentVault: Asset does not exist");
+        require(item.state == AssetState.Active, "PatentVault: Asset delisted");
+        require(msg.value >= item.licenseFee && msg.value > 0, "PatentVault: Insufficient license payment");
+
+        item.totalLicensesSold++;
+        licensedUsers[assetId][msg.sender] = true;
+        accumulatedRoyalties += msg.value;
+
+        emit LicensePurchased(assetId, msg.sender, msg.value);
+    }
+
+    // 2. cancelLicenseListing
+    function cancelLicenseListing(uint256 assetId) external {
+        IntellectualAsset storage item = assets[assetId];
+        require(assetId > 0 && assetId <= assetCounter, "PatentVault: Invalid asset ID");
+        require(item.author == msg.sender || msg.sender == registryCurator, "PatentVault: Unauthorized");
+        require(item.state == AssetState.Active, "PatentVault: Already inactive");
+
+        item.state = AssetState.Delisted;
+        emit AssetDelisted(assetId);
+    }
+
+    // 3. emergencyDrainReserves
+    function emergencyDrainReserves() external onlyCurator {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "PatentVault: Zero contract balance");
+
+        accumulatedRoyalties = 0;
+        (bool sent, ) = registryCurator.call{value: balance}("");
+        require(sent, "PatentVault: Sweep failed");
+
+        emit ReservesDrained(registryCurator, balance);
+    }
+
+    // 4. harvestLicensingRevenue
+    function harvestLicensingRevenue() external onlyCurator {
+        uint256 amount = accumulatedRoyalties;
+        require(amount > 0, "PatentVault: No royalties available");
+
+        accumulatedRoyalties = 0;
+        (bool sent, ) = registryCurator.call{value: amount}("");
+        require(sent, "PatentVault: Harvest failed");
+
+        emit RoyaltiesHarvested(registryCurator, amount);
+    }
+
+    // 5. registerIntellectualAsset
+    function registerIntellectualAsset(uint256 licenseFee, bytes32 metadataCID) external returns (uint256) {
+        require(licenseFee > 0, "PatentVault: License fee must be positive");
+
+        assetCounter++;
+        assets[assetCounter] = IntellectualAsset({
+            author: payable(msg.sender),
+            licenseFee: licenseFee,
+            totalLicensesSold: 0,
+            state: AssetState.Active,
+            metadataCID: metadataCID
+        });
+
+        emit AssetRegistered(assetCounter, msg.sender, licenseFee, metadataCID);
+        return assetCounter;
+    }
+
+    // 6. repriceAssetLicense
+    function repriceAssetLicense(uint256 assetId, uint256 newFee) external {
+        IntellectualAsset storage item = assets[assetId];
+        require(assetId > 0 && assetId <= assetCounter, "PatentVault: Invalid ID");
+        require(item.author == msg.sender || msg.sender == registryCurator, "PatentVault: Unauthorized");
+        require(newFee > 0, "PatentVault: Fee must be positive");
+
+        item.licenseFee = newFee;
+        emit LicenseRepriced(assetId, newFee);
+    }
+
+    // 7. transferAssetOwnership
+    function transferAssetOwnership(uint256 assetId, address payable newAuthor) external {
+        IntellectualAsset storage item = assets[assetId];
+        require(assetId > 0 && assetId <= assetCounter, "PatentVault: Invalid ID");
+        require(item.author == msg.sender || msg.sender == registryCurator, "PatentVault: Unauthorized");
+        require(newAuthor != address(0), "PatentVault: Zero address");
+
+        address old = item.author;
+        item.author = newAuthor;
+        emit OwnershipTransferred(assetId, old, newAuthor);
+    }
+
+    // 8. updateVaultDescriptor
+    function updateVaultDescriptor(string calldata newDescriptor) external onlyCurator {
+        require(bytes(newDescriptor).length > 0, "PatentVault: Empty string");
+        vaultDescriptor = newDescriptor;
+        emit DescriptorUpdated(newDescriptor);
+    }
+
+    // Read-метод
+    function getAssetInfo(uint256 assetId) external view returns (
+        address author,
+        uint256 licenseFee,
+        uint256 totalLicensesSold,
+        AssetState state,
+        bytes32 metadataCID
+    ) {
+        IntellectualAsset memory item = assets[assetId];
+        return (item.author, item.licenseFee, item.totalLicensesSold, item.state, item.metadataCID);
+    }
+}
